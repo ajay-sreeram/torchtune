@@ -479,6 +479,17 @@ _ALL_RECIPES = [
         supports_distributed=True,
     ),
     Recipe(
+        name="dev/early_exit_finetune_single_device",
+        file_path="dev/early_exit_finetune_single_device.py",
+        configs=[
+            Config(
+                name="qwen/1.5B_full_early_exit",
+                file_path="dev/1.5B_full_single_device_early_exit.yaml",
+            ),
+        ],
+        supports_distributed=True,
+    ),
+    Recipe(
         name="eleuther_eval",
         file_path="eleuther_eval.py",
         configs=[
