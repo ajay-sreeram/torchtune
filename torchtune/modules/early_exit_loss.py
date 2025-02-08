@@ -96,6 +96,14 @@ def early_exit_loss(
     batch_loss_fn = copy.deepcopy(loss_fn)
     batch_loss_fn.reduction = "none"
 
+    if not is_think:
+        final_layer = max(hidden_states_dict.keys())
+        final_hidden = hidden_states_dict[final_layer]
+        logits = model.unembed(final_hidden)
+        logits = logits.reshape(-1, logits.size(-1))
+        losses = batch_loss_fn(logits, labels)
+        return losses.float().mean()
+
     e = len(hidden_states_dict)
     # List of e tensors with shape [b, s, d]
     hidden_states = tuple(hidden_states_dict.values())
@@ -123,7 +131,7 @@ def early_exit_loss(
         e_scale,
     )
 
-    return torch.sum(losses_scales * losses_early)
+    return torch.sum(losses_scales * losses_early)    
 
 
 # TODO: create a base curriculum class that can be used for other aspects, e.g., dropout, datasets, etc.
