@@ -725,6 +725,10 @@ class EarlyExitFinetuneRecipeDistributed(FTRecipeInterface):
             else:
                 if train_last_layer:
                     do_output_hidden_states[len(self._model.layers) - 1] = True
+            
+            self.think_start_token = cfg_early_exit_loss.get("think_start_token", "<think>")
+            self.think_end_token = cfg_early_exit_loss.get("think_end_token", "</think>")
+            print(f"Think Start and End tokens: {self.think_start_token}, {self.think_end_token}")
 
         return do_output_hidden_states, early_exit_loss_curriculum
 
@@ -857,6 +861,9 @@ class EarlyExitFinetuneRecipeDistributed(FTRecipeInterface):
 
             pbar = tqdm(total=self._steps_per_epoch, disable=not (rank == 0))
             for idx, batch in enumerate(self._dataloader):
+                if hasattr(torch.cuda, 'empty_cache'):
+                    torch.cuda.empty_cache()
+
                 if (
                     self.max_steps_per_epoch is not None
                     and (idx // self._gradient_accumulation_steps)
@@ -883,7 +890,7 @@ class EarlyExitFinetuneRecipeDistributed(FTRecipeInterface):
                 ).sum()
                 num_tokens += current_num_tokens
 
-                # Shape [b, s], needed for the loss not the model
+                # Shape [b, s], needed for the loss not the model                               
                 labels = batch.pop("labels")
 
                 with self.activations_handling_ctx:
@@ -911,21 +918,73 @@ class EarlyExitFinetuneRecipeDistributed(FTRecipeInterface):
                 # Loss is normalized by default so we multiply by the number of tokens
                 # This way we can normalize by the total number of tokens if we're accumulating gradients
                 if self._model.output_hidden_states:
-                    current_loss = (
-                        early_exit_loss(
+                    # current_loss = (
+                    #     early_exit_loss(
+                    #         self._model,
+                    #         hidden_states,
+                    #         labels,
+                    #         self._loss_fn,
+                    #         self._early_exit_loss_scale,
+                    #         self._early_exit_loss_scale_type,
+                    #     )
+                    #     * current_num_tokens
+                    # )
+                    think_start_token = self._tokenizer.encode(self.think_start_token)[0]
+                    think_end_token = self._tokenizer.encode(self.think_end_token)[0]    
+                    
+                    input_ids = batch["tokens"]
+                    think_mask = torch.zeros_like(input_ids, dtype=torch.bool, device=labels.device)
+                    
+                    # Find think sections and create masks
+                    for b in range(input_ids.size(0)):
+                        starts = (input_ids[b] == think_start_token).nonzero().flatten()
+                        ends = (input_ids[b] == think_end_token).nonzero().flatten()
+                        for start, end in zip(starts, ends):
+                            think_mask[b, start:end] = True
+                    
+                    think_mask = think_mask.reshape(-1)
+                    
+                    # Separate labels for think and answer tokens
+                    think_labels = labels.clone()
+                    answer_labels = labels.clone()
+                    
+                    think_labels[~think_mask] = self._loss_fn.ignore_index
+                    answer_labels[think_mask] = self._loss_fn.ignore_index
+                    
+                    # Calculate losses separately
+                    think_loss = 0.0
+                    if think_mask.any():
+                        think_loss = early_exit_loss(
                             self._model,
                             hidden_states,
-                            labels,
+                            think_labels,
                             self._loss_fn,
                             self._early_exit_loss_scale,
                             self._early_exit_loss_scale_type,
+                            is_think=True
                         )
-                        * current_num_tokens
-                    )
+                    
+                    answer_loss = 0.0
+                    if (~think_mask).any():
+                        answer_loss = early_exit_loss(
+                            self._model,
+                            hidden_states,
+                            answer_labels,
+                            self._loss_fn,
+                            self._early_exit_loss_scale,
+                            self._early_exit_loss_scale_type,
+                            is_think=False
+                        )
+                    
+                    current_loss = (think_loss + answer_loss) * current_num_tokens                
                 else:
                     current_loss = self._loss_fn(logits, labels) * current_num_tokens
 
-                # free logits otherwise it peaks backward memory
+                # free logits otherwise it peaks backward memory                
+                if self._model.output_hidden_states:
+                    del outputs, hidden_states
+                else:
+                    del outputs
                 del logits
 
                 running_loss += current_loss
