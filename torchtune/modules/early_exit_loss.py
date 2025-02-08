@@ -73,6 +73,7 @@ def early_exit_loss(
     loss_scale_fn: Callable[
         [torch.Tensor, int, float], torch.Tensor
     ] = uniform_loss_scale,
+    is_think: bool = False
 ) -> torch.Tensor:
     """
     Compute the early exit loss for a given model and outputs of intermediate layers.
