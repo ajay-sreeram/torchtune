@@ -459,6 +459,59 @@ class EarlyExitFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
         log.info(f"Saving checkpoint took {time.perf_counter() - start:.2f} secs")
 
+    def create_think_mask(self, input_ids, think_start_tokens, think_end_tokens):
+        def find_token_sequence_positions(sequence, target):
+                seq_len = sequence.size(0)
+                target_len = target.size(0)
+                
+                if target_len > seq_len:
+                    return []
+                    
+                positions = []
+                i = 0
+                while i <= seq_len - target_len:
+                    if torch.all(sequence[i:i + target_len] == target):
+                        positions.append(i)
+                        i += target_len  
+                    else:
+                        i += 1
+                return positions
+                    
+        think_mask = torch.zeros_like(input_ids, dtype=torch.bool, device=input_ids.device)
+        
+        for b in range(input_ids.size(0)):
+            # Find all start and end positions
+            starts = find_token_sequence_positions(input_ids[b], think_start_tokens)
+            ends = find_token_sequence_positions(input_ids[b], think_end_tokens)
+            
+            # Skip if we don't have matching pairs
+            if len(starts) == 0 or len(ends) == 0:
+                continue
+                
+            # Match start-end pairs
+            # We only consider ends that come after starts
+            current_start_idx = 0
+            current_end_idx = 0
+            
+            while current_start_idx < len(starts) and current_end_idx < len(ends):
+                start_pos = starts[current_start_idx]
+                end_pos = ends[current_end_idx]
+                
+                # If end comes before start, move to next end
+                if end_pos <= start_pos:
+                    current_end_idx += 1
+                    continue
+                    
+                # We found a valid pair
+                # Mark the section between start and end (including start tokens, excluding end tokens)
+                think_mask[b, start_pos:end_pos] = True
+                
+                # Move to next pair
+                current_start_idx += 1
+                current_end_idx += 1
+        
+        return think_mask
+
     def train(self) -> None:
         if self._compile:
             log.info(
@@ -531,18 +584,31 @@ class EarlyExitFinetuneRecipeSingleDevice(FTRecipeInterface):
                     logits = logits.reshape(-1, logits.size(-1))
 
                 if self._model.output_hidden_states:
-                    think_start_token = self._tokenizer.encode(self.think_start_token)[0]
-                    think_end_token = self._tokenizer.encode(self.think_end_token)[0]    
+                    # think_start_token = self._tokenizer.encode(self.think_start_token)[0]
+                    # think_end_token = self._tokenizer.encode(self.think_end_token)[0]    
+
+                    think_start_tokens = self._tokenizer.encode(self.think_start_token)[:-1] # because for some reason this tokenizer is adding <|im_end|> at the end 
+                    think_end_tokens = self._tokenizer.encode(self.think_end_token)[:-1]
+
+                    think_start_tokens = torch.tensor(think_start_tokens, device=self._device)
+                    think_end_tokens = torch.tensor(think_end_tokens, device=self._device)
                     
-                    input_ids = batch["tokens"]
-                    think_mask = torch.zeros_like(input_ids, dtype=torch.bool, device=labels.device)                    
+                    input_ids = batch["tokens"]                                     
+
+                    # think_mask = torch.zeros_like(input_ids, dtype=torch.bool, device=labels.device)                    
                     
-                    # Find think sections and create masks
-                    for b in range(input_ids.size(0)):
-                        starts = (input_ids[b] == think_start_token).nonzero().flatten()
-                        ends = (input_ids[b] == think_end_token).nonzero().flatten()
-                        for start, end in zip(starts, ends):
-                            think_mask[b, start:end] = True
+                    # # Find think sections and create masks
+                    # for b in range(input_ids.size(0)):
+                    #     starts = (input_ids[b] == think_start_token).nonzero().flatten()
+                    #     ends = (input_ids[b] == think_end_token).nonzero().flatten()
+                    #     for start, end in zip(starts, ends):
+                    #         think_mask[b, start:end] = True
+
+                    think_mask = self.create_think_mask(
+                        input_ids,
+                        think_start_tokens,
+                        think_end_tokens
+                    )                    
                     
                     think_mask = think_mask.reshape(-1)
                     
@@ -653,8 +719,10 @@ class EarlyExitFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                     self._profiler.step()
 
-            self.epochs_run += 1
-            self.save_checkpoint(epoch=curr_epoch)
+            self.epochs_run += 1            
+            # self.save_checkpoint(epoch=curr_epoch) # lets save only at the end
+        
+        self.save_checkpoint(epoch=curr_epoch)
 
         self._profiler.stop()
 
