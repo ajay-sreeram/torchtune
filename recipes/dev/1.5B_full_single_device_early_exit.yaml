@@ -96,5 +96,5 @@ early_exit_loss:
   curriculum: torchtune.modules.early_exit_loss.RotationalEarlyExitCurriculum
   scale_fn: torchtune.modules.early_exit_loss.sum_l_loss_scale
   scale: 1.0
-  think_start_token: "<|box_start|>"
-  think_end_token: "<|box_end|>"
+  think_start_token: "<think>"
+  think_end_token: " </think>"
